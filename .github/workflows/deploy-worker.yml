@@ -1,0 +1,46 @@
+name: Deploy worker to VPS
+
+# Mirrors Netlify's deploy trigger: push to main (and manual dispatch for ad-hoc rebuilds).
+# Runs in parallel with Netlify; both usually finish within ~30-60s of the push.
+on:
+  push:
+    branches: [main]
+    # Only rebuild the worker container when worker code or its deploy config changes.
+    # UI-only commits will still trigger Netlify but skip the VPS rebuild — saves time
+    # and avoids needlessly cycling active calls.
+    paths:
+      - "worker/**"
+      - "docker-compose.yml"
+      - "docker-compose.prod.yml"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch: {} # manual trigger from the Actions tab
+
+# Serialize deploys — don't let two pushes in quick succession step on each other.
+concurrency:
+  group: worker-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /home/dev/apps/ai_booking
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build worker
+            sleep 3
+            docker compose ps worker
+            docker compose logs worker --tail 15
+            curl -fsS http://localhost:8080/health
+            echo
+            echo "Worker deploy succeeded."
