@@ -55,11 +55,17 @@ export default function CallMonitor() {
 
   useEffect(() => {
     let active = true;
-    async function tick() {
+    let finishedAt: number | null = null;
+    const TERMINAL = new Set(["completed", "failed", "busy", "no-answer", "canceled"]);
+
+    async function tick(): Promise<{ status?: string; recordingSid?: string | null } | null> {
       try {
         const callRes = await fetch(`/api/calls/${id}`);
-        if (callRes.ok && active) setState(await callRes.json());
-
+        let nextState: CallState | null = null;
+        if (callRes.ok && active) {
+          nextState = await callRes.json();
+          setState(nextState);
+        }
         const since = lastTsRef.current ? `?since=${encodeURIComponent(lastTsRef.current)}` : "";
         const logsRes = await fetch(`/api/calls/${id}/logs${since}`);
         if (logsRes.ok && active) {
@@ -70,13 +76,32 @@ export default function CallMonitor() {
             if (last?.createdAt) lastTsRef.current = last.createdAt;
           }
         }
+        return nextState ? { status: nextState.call.status, recordingSid: nextState.call.recordingSid } : null;
       } catch {
-        /* swallow — next tick retries */
+        return null;
       }
     }
-    void tick();
-    const t = setInterval(tick, 1500);
-    return () => { active = false; clearInterval(t); };
+
+    let t: ReturnType<typeof setTimeout> | null = null;
+    async function loop() {
+      const result = await tick();
+      if (!active) return;
+      const isTerminal = result?.status && TERMINAL.has(result.status);
+      const hasRecording = !!result?.recordingSid;
+      // Stop polling once the call ended AND we have the recording (or it's
+      // been > 60s since the call ended — recording may have failed to upload).
+      if (isTerminal) {
+        if (!finishedAt) finishedAt = Date.now();
+        if (hasRecording || Date.now() - finishedAt > 60_000) return;
+      }
+      const delay = isTerminal ? 4000 : 1500;
+      t = setTimeout(loop, delay);
+    }
+    void loop();
+    return () => {
+      active = false;
+      if (t) clearTimeout(t);
+    };
   }, [id]);
 
   const transcript = logs.filter((l) => TRANSCRIPT_EVENTS.has(l.eventType));

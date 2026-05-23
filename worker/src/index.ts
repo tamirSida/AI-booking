@@ -56,6 +56,7 @@ async function resolveContext(customParams: Record<string, string>): Promise<Res
     preferences: (reservation.preferences as string[]) ?? [],
     allowNearbyTimes: Boolean(altRaw?.allowNearbyTimes),
     timeWindowMinutes: Number(altRaw?.timeWindowMinutes ?? 30),
+    today: new Date().toISOString().slice(0, 10),
   };
 }
 
@@ -67,6 +68,7 @@ function fallbackContext(): ReservationContext {
     time: "",
     partySize: 1,
     reservationName: "",
+    today: new Date().toISOString().slice(0, 10),
   };
 }
 

@@ -12,6 +12,9 @@ export interface ReservationContext {
   preferences?: string[];
   allowNearbyTimes?: boolean;
   timeWindowMinutes?: number;
+  // Current date the call is happening (YYYY-MM-DD). Used to pick natural Hebrew
+  // phrasing — "היום", "מחר", a weekday name, or a calendar date.
+  today: string;
 }
 
 const GLOBAL = `You are an AI reservation assistant operating inside a controlled backend system.
@@ -51,6 +54,17 @@ Time formatting rules (very important):
 - For times after noon use "בערב" (evening) or "בצהריים" (afternoon); for morning use "בבוקר".
 - If you must read a specific minute (e.g. 21:15), say "תשע ורבע בערב" or "תשע וחמש עשרה בערב".
 
+Date formatting rules (use the runtime "today" value to choose phrasing):
+- If reservation date == today → say "היום".
+- If reservation date == today + 1 day → say "מחר".
+- If reservation date == today + 2 days → say "מחרתיים".
+- If within the next 7 days → say the day of the week ("יום חמישי", "יום ראשון") and add "הקרוב" if needed for disambiguation.
+- 7-14 days out → "בשבוע הבא ביום חמישי" or "בעוד שבוע".
+- 14-30 days out → "בעוד שבועיים ביום חמישי" or "בעוד שלושה שבועות".
+- Further out → say the calendar date naturally: "ה-23 ביולי" (NOT "23/7" or "23-7-2026").
+
+Sound human: short sentences, use everyday words, contract where natural ("רוצֵה" not "מבקשת"), say "אם אפשר" / "אם יש מקום" instead of formal phrasing.
+
 If the host offers an alternative time, accept it if it falls within the user's allowed alternatives below; otherwise ask for the requested time or a closer time.
 
 When the reservation is fully confirmed (the host has agreed on a specific time and accepted the booking):
@@ -75,8 +89,9 @@ export function restaurantSystemPrompt(ctx: ReservationContext): string {
     "",
     "Reservation details to communicate:",
     `- Restaurant: ${ctx.restaurantName}${ctx.city ? ` (${ctx.city})` : ""}`,
-    `- Date: ${ctx.date}`,
-    `- Time (24h, must be spoken in natural Hebrew per rules above): ${ctx.time}`,
+    `- Today's date (for picking היום/מחר/etc.): ${ctx.today}`,
+    `- Reservation date: ${ctx.date} (apply the date formatting rules above)`,
+    `- Time (24h, must be spoken in natural Hebrew): ${ctx.time}`,
     `- Party size: ${ctx.partySize}`,
     `- Reservation under name: ${ctx.reservationName}`,
     altLine,

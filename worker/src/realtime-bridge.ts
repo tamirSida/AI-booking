@@ -50,7 +50,12 @@ interface TwilioMarkEvent {
 interface TwilioConnectedEvent { event: "connected"; protocol: string; version: string }
 interface TwilioStopEvent { event: "stop"; streamSid: string; stop: { callSid: string; accountSid: string } }
 
-type TwilioInboundEvent = TwilioConnectedEvent | TwilioStartEvent | TwilioMediaEvent | TwilioMarkEvent | TwilioStopEvent;
+type TwilioInboundEvent =
+  | TwilioConnectedEvent
+  | TwilioStartEvent
+  | TwilioMediaEvent
+  | (TwilioMarkEvent & { mark: { name: string } })
+  | TwilioStopEvent;
 
 export interface BridgeArgs {
   twilioWs: WebSocket;
@@ -70,6 +75,14 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
   let openai: OpenAIRealtimeWS | null = null;
   let openaiReady = false;
   const earlyAudioQueue: string[] = [];
+
+  // Hangup coordination: when the model calls end_call, we don't terminate the
+  // Twilio call immediately. We wait for the model's final spoken sentence to
+  // (a) finish generating (response.done) and (b) finish playing on the host's
+  // line (Twilio echoes back a mark we send AFTER all media frames). That way
+  // the host actually hears the goodbye.
+  let hangupPending = false;
+  let hangupMarkName: string | null = null;
 
   // Wrap the caller-provided logEverywhere() so every event is mirrored to Firestore with
   // the call/request context. This is how the UI sees live transcripts.
@@ -203,26 +216,29 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
         logEverywhere("ai_transcript_done", { text: e.transcript });
       });
 
-      // Tool-call handler. Currently the only tool is end_call; when invoked,
-      // we use the Twilio REST API to terminate the call leg (which also
-      // unwinds the Media Stream and OpenAI socket via the stream.stopped event).
-      openai.on("response.function_call_arguments.done", async (e) => {
+      // Tool-call handler. When end_call fires we just FLAG a pending hangup —
+      // the actual call termination happens after response.done + mark-echo so
+      // the host hears the full goodbye sentence.
+      openai.on("response.function_call_arguments.done", (e) => {
         logEverywhere("ai_tool_call", { name: e.name, args: e.arguments });
         if (e.name === "end_call") {
-          try {
-            // Give the model's final spoken sentence ~1.5s to finish playing before we hang up.
-            await new Promise((r) => setTimeout(r, 1500));
-            if (!callSid) {
-              logEverywhere("end_call_missing_call_sid", {}, "warn");
-            } else {
-              await twilioRest().calls(callSid).update({ status: "completed" });
-              logEverywhere("end_call_invoked", { callSid, args: e.arguments });
-            }
-          } catch (err) {
-            logEverywhere("end_call_failed", { message: String(err) }, "error");
-          } finally {
-            closeAll("end_call");
-          }
+          hangupPending = true;
+          logEverywhere("hangup_pending", { args: e.arguments });
+        }
+      });
+
+      // response.done fires after the model finishes its current turn (audio +
+      // tool calls). If a hangup is pending, queue a mark on the outbound
+      // audio so we know when the goodbye actually played.
+      openai.on("response.done", () => {
+        if (hangupPending && streamSid && !hangupMarkName) {
+          hangupMarkName = `hangup-${Date.now()}`;
+          twilioWs.send(JSON.stringify({
+            event: "mark",
+            streamSid,
+            mark: { name: hangupMarkName },
+          }));
+          logEverywhere("hangup_mark_sent", { mark: hangupMarkName });
         }
       });
 
@@ -254,6 +270,31 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
         return;
       }
       openai.send({ type: "input_audio_buffer.append", audio: payload });
+      return;
+    }
+
+    if (msg.event === "mark") {
+      // Twilio echoes back our outbound mark once the audio before it has
+      // finished playing on the host's line. If it's our hangup mark, NOW we
+      // terminate the Twilio call.
+      const name = msg.mark?.name;
+      logEverywhere("twilio_mark_received", { name });
+      if (hangupPending && name === hangupMarkName) {
+        (async () => {
+          try {
+            if (!callSid) {
+              logEverywhere("end_call_missing_call_sid", {}, "warn");
+            } else {
+              await twilioRest().calls(callSid).update({ status: "completed" });
+              logEverywhere("end_call_invoked", { callSid });
+            }
+          } catch (err) {
+            logEverywhere("end_call_failed", { message: String(err) }, "error");
+          } finally {
+            closeAll("end_call");
+          }
+        })();
+      }
       return;
     }
 
