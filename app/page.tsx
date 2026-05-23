@@ -259,37 +259,48 @@ function ReservationPanel() {
         <h2 className="text-lg font-medium">Recent reservations</h2>
         {recent.length === 0 && <p className="text-sm opacity-60">None yet.</p>}
         <ul className="space-y-2">
-          {recent.map((r) => (
-            <li key={r.requestId} className="rounded border border-black/10 dark:border-white/10 p-3 text-sm flex items-center justify-between gap-3">
-              {r.lastCallId ? (
-                <Link href={`/calls/${r.lastCallId}`} className="flex-1 min-w-0 hover:opacity-80">
-                  <ReservationRow r={r} />
-                </Link>
-              ) : (
-                <div className="flex-1 min-w-0"><ReservationRow r={r} /></div>
-              )}
-              <button
-                onClick={() => loadFromHistory(r)}
-                className="text-xs rounded border border-black/15 dark:border-white/15 px-2 py-1 hover:bg-black/5 dark:hover:bg-white/5"
-                title="Pre-fill the form with these details"
-              >
-                Book again
-              </button>
-              <span className="text-xs font-mono opacity-70">{r.status}</span>
-            </li>
-          ))}
+          {recent.map((r) => {
+            const Wrapper = r.lastCallId
+              ? (props: { children: React.ReactNode }) => (
+                  <Link
+                    href={`/calls/${r.lastCallId}`}
+                    className="block rounded border border-black/10 dark:border-white/10 p-3 text-sm hover:bg-black/5 dark:hover:bg-white/5 hover:border-blue-400 transition-colors cursor-pointer"
+                  >
+                    {props.children}
+                  </Link>
+                )
+              : (props: { children: React.ReactNode }) => (
+                  <div className="block rounded border border-black/10 dark:border-white/10 p-3 text-sm opacity-70">
+                    {props.children}
+                  </div>
+                );
+            return (
+              <li key={r.requestId}>
+                <Wrapper>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex-1 min-w-0">
+                      <span className="font-mono mr-2">{r.restaurant.name || "Restaurant"}</span>
+                      <span className="opacity-60">{r.reservation.date} {r.reservation.time} · {r.reservation.partySize}p · {r.reservation.reservationName}</span>
+                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-mono opacity-70">{r.status}</span>
+                      {r.lastCallId && <span className="text-xs opacity-50">→</span>}
+                    </div>
+                  </div>
+                </Wrapper>
+                <button
+                  onClick={(e) => { e.stopPropagation(); loadFromHistory(r); }}
+                  className="mt-1 text-xs opacity-70 hover:opacity-100 hover:underline"
+                  title="Pre-fill the form with these details"
+                >
+                  Book again ↺
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </section>
     </div>
-  );
-}
-
-function ReservationRow({ r }: { r: RecentReservation }) {
-  return (
-    <span className="block">
-      <span className="font-mono mr-2">{r.restaurant.name || "Restaurant"}</span>
-      <span className="opacity-60">{r.reservation.date} {r.reservation.time} · {r.reservation.partySize}p · {r.reservation.reservationName}</span>
-    </span>
   );
 }
 
@@ -431,38 +442,53 @@ function AskPanel() {
         <h2 className="text-lg font-medium">Recent questions</h2>
         {recent.length === 0 && <p className="text-sm opacity-60">None yet.</p>}
         <ul className="space-y-2">
-          {recent.map((r) => (
-            <li key={r.requestId} className="rounded border border-black/10 dark:border-white/10 p-3 text-sm space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                {r.lastCallId ? (
-                  <Link href={`/calls/${r.lastCallId}`} className="font-mono hover:opacity-80 flex-1 min-w-0 truncate">
-                    {r.recipientName ?? r.recipientPhoneNumber}
+          {recent.map((r) => {
+            const Wrapper = r.lastCallId
+              ? (props: { children: React.ReactNode }) => (
+                  <Link
+                    href={`/calls/${r.lastCallId}`}
+                    className="block rounded border border-black/10 dark:border-white/10 p-3 text-sm space-y-2 hover:bg-black/5 dark:hover:bg-white/5 hover:border-blue-400 transition-colors cursor-pointer"
+                  >
+                    {props.children}
                   </Link>
-                ) : (
-                  <span className="font-mono flex-1 min-w-0 truncate">{r.recipientName ?? r.recipientPhoneNumber}</span>
-                )}
+                )
+              : (props: { children: React.ReactNode }) => (
+                  <div className="block rounded border border-black/10 dark:border-white/10 p-3 text-sm space-y-2 opacity-70">
+                    {props.children}
+                  </div>
+                );
+            return (
+              <li key={r.requestId}>
+                <Wrapper>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono flex-1 min-w-0 truncate">{r.recipientName ?? r.recipientPhoneNumber}</span>
+                    <span className="text-xs font-mono opacity-70 shrink-0">
+                      {r.status} · {(r.answers?.length ?? 0)}/{(r.questions?.length ?? 0)}
+                      {r.lastCallId && <span className="opacity-50 ml-2">→</span>}
+                    </span>
+                  </div>
+                  <div dir="auto" className="space-y-1">
+                    {(r.questions ?? []).map((q, i) => {
+                      const a = (r.answers ?? []).find((x) => x.index === i);
+                      return (
+                        <div key={i} className="opacity-90 pl-1">
+                          <div>Q{i + 1}: {q}</div>
+                          {a && <div className="opacity-70 pl-3">A: {a.answer}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Wrapper>
                 <button
-                  onClick={() => loadFromHistory(r)}
-                  className="text-xs rounded border border-black/15 dark:border-white/15 px-2 py-1 hover:bg-black/5 dark:hover:bg-white/5"
+                  onClick={(e) => { e.stopPropagation(); loadFromHistory(r); }}
+                  className="mt-1 text-xs opacity-70 hover:opacity-100 hover:underline"
                   title="Pre-fill the form with these details"
                 >
-                  Ask again
+                  Ask again ↺
                 </button>
-                <span className="text-xs font-mono opacity-70">{r.status} · {(r.answers?.length ?? 0)}/{(r.questions?.length ?? 0)}</span>
-              </div>
-              <div dir="auto" className="space-y-1">
-                {(r.questions ?? []).map((q, i) => {
-                  const a = (r.answers ?? []).find((x) => x.index === i);
-                  return (
-                    <div key={i} className="opacity-90 pl-1">
-                      <div>Q{i + 1}: {q}</div>
-                      {a && <div className="opacity-70 pl-3">A: {a.answer}</div>}
-                    </div>
-                  );
-                })}
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       </section>
     </div>
