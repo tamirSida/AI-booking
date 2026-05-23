@@ -1,0 +1,13 @@
+# Production override for the worker container.
+# Run on the VPS as:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build worker
+#
+# Differences from the dev compose:
+#   - No source volume mount (code is baked into the image at build time)
+#   - No tsx watch (uses the Dockerfile's default CMD: `npx tsx src/index.ts`)
+#   - restart: always (survives reboots; cloudflared brings it back online)
+services:
+  worker:
+    volumes: []
+    command: []
+    restart: always
