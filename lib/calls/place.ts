@@ -51,8 +51,13 @@ export async function placeCall(args: PlaceCallArgs): Promise<string> {
     );
   }
 
-  // FSM walk — same as the LLM handler does.
-  let next = transition(withPhone.status, "fields_complete");
+  // FSM walk. The LLM intake path arrives here in COLLECTING_REQUEST and needs
+  // the fields_complete transition first; the structured-form path skips intake
+  // and starts in READY_TO_CALL, so the first hop is a no-op.
+  let next = withPhone.status;
+  if (next === "COLLECTING_REQUEST" || next === "CLARIFYING_DETAILS") {
+    next = transition(next, "fields_complete");
+  }
   next = transition(next, "user_confirmed");
   await saveReservation({ ...withPhone, status: next });
 
