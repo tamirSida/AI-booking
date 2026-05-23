@@ -82,6 +82,7 @@ export async function GET() {
       status: data.status,
       restaurant: data.restaurant,
       reservation: data.reservation,
+      lastCallId: data.lastCallId ?? null,
       updatedAt: data.updatedAt,
     };
   });

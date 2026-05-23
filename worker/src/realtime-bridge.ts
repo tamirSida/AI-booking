@@ -17,6 +17,8 @@ import { OpenAIRealtimeWS } from "openai/realtime/ws";
 import twilioPkg from "twilio";
 import { restaurantSystemPrompt } from "./prompts.js";
 import type { ReservationContext } from "./prompts.js";
+import { askSystemPrompt } from "./ask-prompts.js";
+import type { AskContext } from "./ask-prompts.js";
 import { writeLog } from "./firestore-logs.js";
 
 const twilioRest = () => {
@@ -58,24 +60,42 @@ type TwilioInboundEvent =
   | (TwilioMarkEvent & { mark: { name: string } })
   | TwilioStopEvent;
 
+export type ResolvedContext =
+  | { type: "reservation"; ctx: ReservationContext }
+  | { type: "ask"; ctx: AskContext; askRequestId: string };
+
 export interface BridgeArgs {
   twilioWs: WebSocket;
   openaiApiKey: string;
   realtimeModel: string;
-  resolveContext: (customParams: Record<string, string>) => Promise<ReservationContext>;
+  resolveContext: (customParams: Record<string, string>) => Promise<ResolvedContext>;
+  // Called when the model uses the record_answer tool (ask flow).
+  onAnswer?: (args: { askRequestId: string; index: number; answer: string; confidence?: number }) => Promise<void>;
   log: (event: string, details?: Record<string, unknown>, level?: "info" | "warn" | "error") => void;
 }
 
 export async function runBridge(args: BridgeArgs): Promise<void> {
-  const { twilioWs, openaiApiKey, realtimeModel, resolveContext, log } = args;
+  const { twilioWs, openaiApiKey, realtimeModel, resolveContext, onAnswer, log } = args;
 
   let streamSid: string | null = null;
   let callSid: string | null = null;
   let internalCallId: string | null = null;
   let internalRequestId: string | null = null;
-  let openai: OpenAIRealtimeWS | null = null;
+  let resolved: ResolvedContext | null = null;
+  let askRequestId: string | null = null;
+  let sessionCreatedSeen = false;
   let openaiReady = false;
   const earlyAudioQueue: string[] = [];
+
+  // PRE-WARM: open the OpenAI WS immediately on bridge entry instead of
+  // waiting for Twilio's "start" event. The handshake + session.created
+  // round-trip (usually 500-1500ms) happens IN PARALLEL with Twilio's start
+  // event arriving. session.update is sent once both context is resolved AND
+  // session.created has fired (whichever happens last).
+  const openai = new OpenAIRealtimeWS(
+    { model: realtimeModel },
+    new OpenAI({ apiKey: openaiApiKey }),
+  );
   // Fallback: if the host doesn't speak within this many ms after the stream
   // starts, the AI initiates. Covers silent-host and distracted-pickup cases.
   // Trade-off: an IVR with long hold music could trigger this and the AI would
@@ -105,9 +125,176 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
   const closeAll = (reason: string) => {
     logEverywhere("bridge_closing", { reason });
     if (hostSilenceTimer) { clearTimeout(hostSilenceTimer); hostSilenceTimer = null; }
-    try { openai?.close({ code: 1000, reason }); } catch {}
+    try { openai.close({ code: 1000, reason }); } catch {}
     try { twilioWs.close(1000, reason); } catch {}
   };
+
+  const trySendSessionUpdate = () => {
+    if (!sessionCreatedSeen || !resolved) return;
+    openai.send({
+      type: "session.update",
+      session: {
+        type: "realtime",
+        model: realtimeModel,
+        instructions:
+          resolved.type === "reservation"
+            ? restaurantSystemPrompt(resolved.ctx)
+            : askSystemPrompt(resolved.ctx),
+        output_modalities: ["audio"],
+        reasoning: { effort: "minimal" },
+        tools:
+          resolved.type === "reservation"
+            ? [
+                {
+                  type: "function",
+                  name: "end_call",
+                  description:
+                    "End the phone call. Use ONLY when the reservation is fully confirmed and acknowledged, or when the host has clearly declined. Say a brief polite goodbye BEFORE calling this tool.",
+                  parameters: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      outcome: { type: "string", enum: ["reserved", "declined", "unreachable", "other"] },
+                      confirmedTime: { type: "string" },
+                      notes: { type: "string" },
+                    },
+                    required: ["outcome"],
+                  },
+                },
+              ]
+            : [
+                {
+                  type: "function",
+                  name: "record_answer",
+                  description:
+                    "Capture the recipient's answer to a specific question (by index). Call this each time you finish a question, before moving to the next.",
+                  parameters: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      index: { type: "integer", description: "0-based index in the questions list." },
+                      answer: { type: "string" },
+                      confidence: { type: "number" },
+                    },
+                    required: ["index", "answer"],
+                  },
+                },
+                {
+                  type: "function",
+                  name: "end_call",
+                  description:
+                    "End the phone call after all answers are recorded or the recipient declines.",
+                  parameters: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      outcome: { type: "string", enum: ["answered", "declined", "unreachable", "other"] },
+                      notes: { type: "string" },
+                    },
+                    required: ["outcome"],
+                  },
+                },
+              ],
+        audio: {
+          input: {
+            format: { type: "audio/pcmu" },
+            transcription: { model: "whisper-1" },
+            turn_detection: {
+              type: "semantic_vad",
+              eagerness: "high",
+              interrupt_response: false,
+              create_response: true,
+            },
+          },
+          output: {
+            format: { type: "audio/pcmu" },
+            voice: "marin",
+          },
+        },
+      },
+    });
+    logEverywhere("openai_session_update_sent", { type: resolved.type });
+  };
+
+  // Wire OpenAI handlers up front (they fire as soon as the WS is connected).
+  openai.on("response.created", () => { responseInFlight = true; });
+  openai.on("response.done", () => { responseInFlight = false; });
+
+  openai.on("session.created", () => {
+    logEverywhere("openai_session_created");
+    sessionCreatedSeen = true;
+    trySendSessionUpdate();
+  });
+
+  openai.on("session.updated", () => {
+    openaiReady = true;
+    logEverywhere("openai_session_updated", { queuedFrames: earlyAudioQueue.length });
+    for (const payload of earlyAudioQueue) {
+      openai.send({ type: "input_audio_buffer.append", audio: payload });
+    }
+    earlyAudioQueue.length = 0;
+  });
+
+  openai.on("response.output_audio.delta", (e) => {
+    if (!streamSid) return;
+    twilioWs.send(JSON.stringify({ event: "media", streamSid, media: { payload: e.delta } }));
+  });
+
+  openai.on("response.output_audio_transcript.delta", (e) => {
+    logEverywhere("ai_transcript_delta", { text: e.delta });
+  });
+
+  openai.on("response.output_audio_transcript.done", (e) => {
+    logEverywhere("ai_transcript_done", { text: e.transcript });
+  });
+
+  openai.on("response.function_call_arguments.done", async (e) => {
+    logEverywhere("ai_tool_call", { name: e.name, args: e.arguments });
+    if (e.name === "end_call") {
+      hangupPending = true;
+      logEverywhere("hangup_pending", { args: e.arguments });
+    } else if (e.name === "record_answer") {
+      if (!askRequestId || !onAnswer) {
+        logEverywhere("record_answer_no_handler", {}, "warn");
+        return;
+      }
+      try {
+        const parsed = JSON.parse(e.arguments || "{}") as { index?: number; answer?: string; confidence?: number };
+        if (typeof parsed.answer === "string" && typeof parsed.index === "number") {
+          await onAnswer({ askRequestId, index: parsed.index, answer: parsed.answer, confidence: parsed.confidence });
+          logEverywhere("ask_answer_recorded", { index: parsed.index, answer: parsed.answer });
+        }
+      } catch (err) {
+        logEverywhere("record_answer_parse_failed", { message: String(err) }, "error");
+      }
+    }
+  });
+
+  openai.on("response.done", () => {
+    if (hangupPending && streamSid && !hangupMarkName) {
+      hangupMarkName = `hangup-${Date.now()}`;
+      twilioWs.send(JSON.stringify({ event: "mark", streamSid, mark: { name: hangupMarkName } }));
+      logEverywhere("hangup_mark_sent", { mark: hangupMarkName });
+    }
+  });
+
+  openai.on("conversation.item.input_audio_transcription.completed", (e) => {
+    logEverywhere("host_transcript", { text: e.transcript });
+  });
+
+  openai.on("input_audio_buffer.speech_started", () => {
+    hostHasSpoken = true;
+    if (hostSilenceTimer) { clearTimeout(hostSilenceTimer); hostSilenceTimer = null; }
+    logEverywhere("host_speech_started");
+  });
+
+  openai.on("error", (err) => {
+    logEverywhere("openai_error", { message: err.message, data: err.error });
+  });
+
+  openai.socket.on("close", (code, reason) => {
+    logEverywhere("openai_socket_closed", { code, reason: reason.toString() });
+  });
 
   twilioWs.on("message", async (raw) => {
     let msg: TwilioInboundEvent;
@@ -132,191 +319,21 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
 
       // Arm the silent-host fallback. Cleared when host_speech_started fires.
       hostSilenceTimer = setTimeout(() => {
-        if (hostHasSpoken || !openai || !openaiReady || responseInFlight) return;
+        if (hostHasSpoken || !openaiReady || responseInFlight) return;
         logEverywhere("host_silence_timeout_fired");
         openai.send({ type: "response.create" });
       }, HOST_SILENCE_TIMEOUT_MS);
 
-      const context = await resolveContext(msg.start.customParameters ?? {});
-      openai = new OpenAIRealtimeWS(
-        { model: realtimeModel },
-        new OpenAI({ apiKey: openaiApiKey }),
-      );
-
-      // Track response lifecycle so we know when it's safe to fire a new one.
-      openai.on("response.created", () => { responseInFlight = true; });
-      openai.on("response.done", () => { responseInFlight = false; });
-
-      // When the host's utterance is committed (speech_stopped + buffer
-      // committed), trigger a response — but only if one isn't already in
-      // flight. This replaces create_response: true.
-      openai.on("input_audio_buffer.speech_stopped", () => {
-        if (responseInFlight) {
-          logEverywhere("response_skipped_in_flight");
-          return;
-        }
-        openai!.send({ type: "response.create" });
-      });
-
-      openai.on("session.created", () => {
-        logEverywhere("openai_session_created");
-        // Send session.update AND response.create in one burst so the AI starts
-        // generating the greeting immediately instead of waiting another round-
-        // trip for session.updated. OpenAI processes client events in order,
-        // so the session config is applied before the response runs.
-        openai!.send({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            model: realtimeModel,
-            instructions: restaurantSystemPrompt(context),
-            output_modalities: ["audio"],
-            // gpt-realtime-2 is a reasoning model and by default "thinks"
-            // before speaking — adds ~1-2s of silence before the first audio
-            // frame. For a phone reservation we need conversational pace, not
-            // deep planning. Minimal effort cuts that overhead dramatically.
-            reasoning: { effort: "minimal" },
-            tools: [
-              {
-                type: "function",
-                name: "end_call",
-                description:
-                  "End the phone call. Use ONLY when the reservation is fully confirmed and acknowledged, or when the host has clearly declined and there is nothing more to discuss. Say a brief polite goodbye sentence BEFORE calling this tool — but call it immediately after, do not wait for the host's response.",
-                parameters: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    outcome: {
-                      type: "string",
-                      enum: ["reserved", "declined", "unreachable", "other"],
-                    },
-                    confirmedTime: {
-                      type: "string",
-                      description: "If reserved, the final agreed time in HH:mm (24h). Empty otherwise.",
-                    },
-                    notes: { type: "string" },
-                  },
-                  required: ["outcome"],
-                },
-              },
-            ],
-            audio: {
-              input: {
-                format: { type: "audio/pcmu" },
-                transcription: { model: "whisper-1" },
-                turn_detection: {
-                  // Semantic VAD with high eagerness caps at 2s, feels snappy.
-                  // create_response: false — we manually fire response.create
-                  // when (a) host has finished speaking AND (b) no response is
-                  // currently in flight. This avoids "active response in
-                  // progress" errors when the host barges in or background
-                  // noise re-triggers VAD before the AI finishes its turn.
-                  type: "semantic_vad",
-                  eagerness: "high",
-                  interrupt_response: false,
-                  create_response: false,
-                },
-              },
-              output: {
-                format: { type: "audio/pcmu" },
-                // `marin` is one of OpenAI's newer natural voices (recommended along with `cedar`).
-                voice: "marin",
-              },
-            },
-          },
-        });
-        // Stay silent until the host says something. Server VAD will detect
-        // their first utterance and (because turn_detection.create_response =
-        // true) auto-fire a response. This naturally skips IVR hold music —
-        // music doesn't trigger VAD, only speech does. The prompt instructs
-        // the model that its FIRST response is always the Turn 1 template
-        // regardless of what the host actually said.
-      });
-
-      openai.on("session.updated", () => {
-        openaiReady = true;
-        logEverywhere("openai_session_updated", { queuedFrames: earlyAudioQueue.length });
-        // Flush any input audio that piled up while we waited for the session
-        // to be configured (input_audio_format must be set before we can append).
-        for (const payload of earlyAudioQueue) {
-          openai!.send({ type: "input_audio_buffer.append", audio: payload });
-        }
-        earlyAudioQueue.length = 0;
-      });
-
-      // GA Realtime renamed audio events: response.audio.* → response.output_audio.*
-      openai.on("response.output_audio.delta", (e) => {
-        if (!streamSid) return;
-        // OpenAI sends g711_ulaw base64; Twilio expects the same — pass-through.
-        twilioWs.send(JSON.stringify({
-          event: "media",
-          streamSid,
-          media: { payload: e.delta },
-        }));
-      });
-
-      openai.on("response.output_audio_transcript.delta", (e) => {
-        logEverywhere("ai_transcript_delta", { text: e.delta });
-      });
-
-      openai.on("response.output_audio_transcript.done", (e) => {
-        logEverywhere("ai_transcript_done", { text: e.transcript });
-      });
-
-      // Tool-call handler. When end_call fires we just FLAG a pending hangup —
-      // the actual call termination happens after response.done + mark-echo so
-      // the host hears the full goodbye sentence.
-      openai.on("response.function_call_arguments.done", (e) => {
-        logEverywhere("ai_tool_call", { name: e.name, args: e.arguments });
-        if (e.name === "end_call") {
-          hangupPending = true;
-          logEverywhere("hangup_pending", { args: e.arguments });
-        }
-      });
-
-      // response.done fires after the model finishes its current turn (audio +
-      // tool calls). If a hangup is pending, queue a mark on the outbound
-      // audio so we know when the goodbye actually played.
-      openai.on("response.done", () => {
-        if (hangupPending && streamSid && !hangupMarkName) {
-          hangupMarkName = `hangup-${Date.now()}`;
-          twilioWs.send(JSON.stringify({
-            event: "mark",
-            streamSid,
-            mark: { name: hangupMarkName },
-          }));
-          logEverywhere("hangup_mark_sent", { mark: hangupMarkName });
-        }
-      });
-
-      openai.on("conversation.item.input_audio_transcription.completed", (e) => {
-        logEverywhere("host_transcript", { text: e.transcript });
-      });
-
-      openai.on("input_audio_buffer.speech_started", () => {
-        // With interrupt_response: false, OpenAI does NOT cancel the current
-        // assistant response when the host starts speaking. Don't wipe the
-        // Twilio outbound buffer — let the AI's sentence finish, then it'll
-        // respond to the host's turn naturally on the next response.create.
-        hostHasSpoken = true;
-        if (hostSilenceTimer) { clearTimeout(hostSilenceTimer); hostSilenceTimer = null; }
-        logEverywhere("host_speech_started");
-      });
-
-      openai.on("error", (err) => {
-        logEverywhere("openai_error", { message: err.message, data: err.error });
-      });
-
-      openai.socket.on("close", (code, reason) => {
-        logEverywhere("openai_socket_closed", { code, reason: reason.toString() });
-      });
-
+      // Resolve context and (if session.created already fired) send session.update.
+      resolved = await resolveContext(msg.start.customParameters ?? {});
+      askRequestId = resolved.type === "ask" ? resolved.askRequestId : null;
+      trySendSessionUpdate();
       return;
     }
 
     if (msg.event === "media") {
       const payload = msg.media.payload;
-      if (!openai || !openaiReady) {
+      if (!openaiReady) {
         earlyAudioQueue.push(payload);
         return;
       }

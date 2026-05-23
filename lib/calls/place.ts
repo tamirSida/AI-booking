@@ -5,6 +5,7 @@
 
 import type { TraceCtx } from "@/lib/logging/trace";
 import { REQUIRED_FIELDS, type ReservationRequest } from "@/lib/reservation/schema";
+import { reservationsCol } from "@/lib/firebase/admin";
 import { getReservation, saveReservation } from "@/lib/reservation/store";
 import { transition } from "@/lib/state/machine";
 import { startRestaurantCall } from "@/lib/calls/start";
@@ -66,5 +67,9 @@ export async function placeCall(args: PlaceCallArgs): Promise<string> {
     reservation: { ...withPhone, status: next },
     reservationSummary: args.reservationSummary,
   });
+
+  // Stamp the reservation with the latest callId so the UI can link to the monitor.
+  await reservationsCol().doc(args.requestId).set({ lastCallId: callId }, { merge: true });
+
   return callId;
 }

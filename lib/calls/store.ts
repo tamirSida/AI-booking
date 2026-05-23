@@ -4,9 +4,15 @@ import { callsCol } from "@/lib/firebase/admin";
 
 // Firestore `calls` collection helpers — design doc §14.4.
 
+export type CallPurpose = "reservation" | "ask";
+
 export interface CallRecord {
   callId: string;
   requestId: string;
+  // Which feature triggered this call. The worker uses this to pick the right
+  // system prompt + tool set + Firestore collection to load context from.
+  // Existing reservation calls default to "reservation" if missing.
+  purpose?: CallPurpose;
   conferenceName: string;
   twilioCallSid?: string;
   twilioConferenceSid?: string;
@@ -27,10 +33,12 @@ export async function createCallRecord(args: {
   callId: string;
   requestId: string;
   conferenceName: string;
+  purpose?: CallPurpose;
 }): Promise<void> {
   await callsCol().doc(args.callId).set({
     callId: args.callId,
     requestId: args.requestId,
+    purpose: args.purpose ?? "reservation",
     conferenceName: args.conferenceName,
     status: "queued",
     participants: [],

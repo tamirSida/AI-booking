@@ -10,6 +10,7 @@ interface CallState {
     twilioCallSid?: string;
     status?: string;
     requestId?: string;
+    purpose?: "reservation" | "ask";
     recordingSid: string | null;
     recordingDurationSeconds: number | null;
     handoffTriggered: boolean;
@@ -18,6 +19,14 @@ interface CallState {
     status: string;
     restaurant: { name: string; city: string };
     reservation: { date: string; time: string; partySize: number; reservationName: string };
+  } | null;
+  ask: {
+    status: string;
+    recipientPhoneNumber: string;
+    recipientName: string | null;
+    onBehalfOf: string;
+    questions: string[];
+    answers: Array<{ index: number; question: string; answer: string; confidence: number | null }>;
   } | null;
 }
 
@@ -119,21 +128,55 @@ export default function CallMonitor() {
         <Box label="Twilio call status">
           <Pill value={state?.call.status} />
         </Box>
-        <Box label="Reservation FSM state">
-          <Pill value={state?.reservation?.status} />
+        <Box label={state?.call.purpose === "ask" ? "Ask state" : "Reservation FSM state"}>
+          <Pill value={state?.call.purpose === "ask" ? state.ask?.status : state?.reservation?.status} />
         </Box>
-        <Box label="Restaurant">
-          {state?.reservation ? (
-            <div className="font-mono text-xs">
-              <div>{state.reservation.restaurant.name} ({state.reservation.restaurant.city})</div>
-              <div className="opacity-70">{state.reservation.reservation.date} {state.reservation.reservation.time}, {state.reservation.reservation.partySize}p · {state.reservation.reservation.reservationName}</div>
-            </div>
-          ) : <span className="opacity-50">—</span>}
-        </Box>
-        <Box label="Handoff">
-          <span className="text-xs font-mono">{state?.call.handoffTriggered ? "triggered" : "no"}</span>
-        </Box>
+        {state?.call.purpose === "ask" ? (
+          <Box label={`Questions (${(state.ask?.answers?.length ?? 0) ?? 0}/${(state.ask?.questions?.length ?? 0) ?? 0} answered)`}>
+            {state.ask ? (
+              <div className="text-xs space-y-1" dir="auto">
+                <div className="font-mono">📞 {state.ask.recipientPhoneNumber}{state.ask.recipientName ? ` (${state.ask.recipientName})` : ""}</div>
+                <div className="opacity-70 font-mono">on behalf of {state.ask.onBehalfOf}</div>
+                {(state.ask.questions ?? []).map((q, i) => (
+                  <div key={i} className="pl-1">Q{i + 1}: {q}</div>
+                ))}
+              </div>
+            ) : <span className="opacity-50">—</span>}
+          </Box>
+        ) : (
+          <Box label="Restaurant">
+            {state?.reservation ? (
+              <div className="font-mono text-xs">
+                <div>{state.reservation.restaurant.name} ({state.reservation.restaurant.city})</div>
+                <div className="opacity-70">{state.reservation.reservation.date} {state.reservation.reservation.time}, {state.reservation.reservation.partySize}p · {state.reservation.reservation.reservationName}</div>
+              </div>
+            ) : <span className="opacity-50">—</span>}
+          </Box>
+        )}
+        {state?.call.purpose === "ask" ? (
+          <Box label="Captured answers">
+            {state.ask && (state.ask.answers?.length ?? 0) > 0 ? (
+              <div className="text-xs space-y-2" dir="auto">
+                {(state.ask.answers ?? []).map((a) => (
+                  <div key={a.index}>
+                    <div className="opacity-60">Q{a.index + 1}: {a.question}</div>
+                    <div className="font-medium">A: {a.answer}</div>
+                    {a.confidence != null && (
+                      <div className="opacity-60">confidence: {Math.round(a.confidence * 100)}%</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : <span className="text-xs opacity-60">waiting…</span>}
+          </Box>
+        ) : (
+          <Box label="Handoff">
+            <span className="text-xs font-mono">{state?.call.handoffTriggered ? "triggered" : "no"}</span>
+          </Box>
+        )}
       </section>
+
+      <HangupButton state={state} />
 
       <section className="space-y-2">
         <h2 className="text-lg font-medium">Transcript</h2>
@@ -183,6 +226,33 @@ export default function CallMonitor() {
         </ul>
       </section>
     </main>
+  );
+}
+
+function HangupButton({ state }: { state: CallState | null }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const status = state?.call.status;
+  const terminal = !status || ["completed", "failed", "busy", "no-answer", "canceled"].includes(status);
+  if (terminal || !state?.call.callId) return null;
+  async function hangup() {
+    if (!confirm("End this call now?")) return;
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/calls/${state!.call.callId}/hangup`, { method: "POST" });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setError(d.error ?? "failed");
+    }
+    setBusy(false);
+  }
+  return (
+    <div className="flex items-center gap-3">
+      <button onClick={hangup} disabled={busy} className="rounded bg-red-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50">
+        {busy ? "Hanging up…" : "Hang up call"}
+      </button>
+      {error && <span className="text-xs text-red-600">{error}</span>}
+    </div>
   );
 }
 
