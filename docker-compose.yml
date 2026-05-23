@@ -1,0 +1,20 @@
+services:
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: ai_booking_worker
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.local
+    environment:
+      # Inside the container, Fastify binds 0.0.0.0:8080 (the worker code already does this).
+      WORKER_PORT: "8080"
+    volumes:
+      # Hot-reload during development. Source edits on the host reload tsx inside the container.
+      - ./worker/src:/app/src:ro
+      - ./worker/tsconfig.json:/app/tsconfig.json:ro
+    # Override the image's default CMD to use tsx watch instead of plain tsx.
+    command: ["npx", "tsx", "watch", "src/index.ts"]
+    restart: unless-stopped

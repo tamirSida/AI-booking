@@ -1,0 +1,55 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+worker/dist
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# env files — these contain real secrets (OpenAI/Twilio/Firebase/Telegram).
+# Never commit. The .env.local.example template is safe and IS tracked.
+.env*
+!.env.local.example
+
+# Firebase service-account JSON. Defensive patterns for anywhere in the repo —
+# the file shouldn't exist locally either (paste the contents into .env.local),
+# but if one gets dropped these patterns guarantee it won't be committed.
+*-firebase-adminsdk-*.json
+*service-account*.json
+*serviceAccount*.json
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Personal files / scratch directory (design doc lives here; not committed).
+/files
