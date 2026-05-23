@@ -5,6 +5,7 @@ import { newTrace } from "@/lib/logging/trace";
 import { reservationsCol } from "@/lib/firebase/admin";
 import { saveReservation } from "@/lib/reservation/store";
 import type { ReservationRequest } from "@/lib/reservation/schema";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +30,9 @@ const Body = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const trace = newTrace();
   let body: z.infer<typeof Body>;
   try {
@@ -73,7 +77,10 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ requestId, reservation, traceId: trace.traceId });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const snap = await reservationsCol().orderBy("updatedAt", "desc").limit(20).get();
   const items = snap.docs.map((d) => {
     const data = d.data() as Record<string, unknown>;

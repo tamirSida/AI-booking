@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { authedFetch } from "@/lib/auth/fetch-with-auth";
 import Link from "next/link";
 
 interface Contact {
@@ -19,7 +20,7 @@ export default function ContactsPage() {
 
   useEffect(() => { void refresh(); }, []);
   async function refresh() {
-    const res = await fetch("/api/contacts");
+    const res = await authedFetch("/api/contacts");
     if (res.ok) {
       const d = await res.json();
       setContacts(d.items ?? []);
@@ -29,7 +30,7 @@ export default function ContactsPage() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const res = await fetch("/api/contacts", {
+    const res = await authedFetch("/api/contacts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, phoneNumber, notes: notes || null }),
@@ -42,7 +43,7 @@ export default function ContactsPage() {
 
   async function remove(id: string) {
     if (!confirm("Delete this contact?")) return;
-    await fetch(`/api/contacts/${id}`, { method: "DELETE" });
+    await authedFetch(`/api/contacts/${id}`, { method: "DELETE" });
     void refresh();
   }
 

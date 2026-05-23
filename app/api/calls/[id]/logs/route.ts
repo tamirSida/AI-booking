@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logsCol } from "@/lib/firebase/admin";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,9 @@ export const dynamic = "force-dynamic";
 // Returns log entries scoped to this callId. UI polls this to build the live transcript.
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const { id: callId } = await ctx.params;
   const since = req.nextUrl.searchParams.get("since");
   // Requires composite index (callId asc, createdAt asc). See firestore.indexes.json.

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { newTrace } from "@/lib/logging/trace";
 import { asksCol, newAskId, saveAsk } from "@/lib/ask/store";
 import type { AskRequest } from "@/lib/ask/schema";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,9 @@ const Body = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const trace = newTrace();
   let body: z.infer<typeof Body>;
   try {
@@ -39,7 +43,10 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ requestId, ask, traceId: trace.traceId });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const snap = await asksCol().orderBy("updatedAt", "desc").limit(20).get();
   const items = snap.docs.map((d) => {
     const data = d.data() as Record<string, unknown>;

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import { authedFetch } from "@/lib/auth/fetch-with-auth";
 import Link from "next/link";
 
 interface CallState {
@@ -69,14 +70,14 @@ export default function CallMonitor() {
 
     async function tick(): Promise<{ status?: string; recordingSid?: string | null } | null> {
       try {
-        const callRes = await fetch(`/api/calls/${id}`);
+        const callRes = await authedFetch(`/api/calls/${id}`);
         let nextState: CallState | null = null;
         if (callRes.ok && active) {
           nextState = await callRes.json();
           setState(nextState);
         }
         const since = lastTsRef.current ? `?since=${encodeURIComponent(lastTsRef.current)}` : "";
-        const logsRes = await fetch(`/api/calls/${id}/logs${since}`);
+        const logsRes = await authedFetch(`/api/calls/${id}/logs${since}`);
         if (logsRes.ok && active) {
           const data = await logsRes.json();
           if (data.items?.length) {
@@ -239,7 +240,7 @@ function HangupButton({ state }: { state: CallState | null }) {
     if (!confirm("End this call now?")) return;
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/calls/${state!.call.callId}/hangup`, { method: "POST" });
+    const res = await authedFetch(`/api/calls/${state!.call.callId}/hangup`, { method: "POST" });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       setError(d.error ?? "failed");

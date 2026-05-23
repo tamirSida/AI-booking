@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { newTrace } from "@/lib/logging/trace";
 import { placeCall, ReservationNotReadyError } from "@/lib/calls/place";
 import { getReservation } from "@/lib/reservation/store";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +11,9 @@ export const dynamic = "force-dynamic";
 // Triggers the Twilio call. Used by the structured-UI confirm step.
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const { id: requestId } = await ctx.params;
   const trace = newTrace({ requestId });
   const reservation = await getReservation(requestId);

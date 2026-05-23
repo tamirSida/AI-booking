@@ -4,6 +4,7 @@ import { newTrace } from "@/lib/logging/trace";
 import { openai } from "@/lib/openai/client";
 import { runIntakeAgent } from "@/lib/openai/agent";
 import { emptyReservation, getReservation, saveReservation, createConversation, getConversation } from "@/lib/reservation/store";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,9 @@ const PostBody = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const trace = newTrace();
   let body: z.infer<typeof PostBody>;
   try {

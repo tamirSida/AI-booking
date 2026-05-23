@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { listContacts, newContactId, saveContact } from "@/lib/contacts/store";
 import type { Contact } from "@/lib/contacts/schema";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,9 @@ const Body = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   let body: z.infer<typeof Body>;
   try {
     body = Body.parse(await req.json());
@@ -30,7 +34,10 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ contact });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const items = await listContacts();
   return NextResponse.json({ items });
 }

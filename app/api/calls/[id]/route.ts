@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCallRecord } from "@/lib/calls/store";
 import { getReservation } from "@/lib/reservation/store";
 import { getAsk } from "@/lib/ask/store";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,10 @@ export const dynamic = "force-dynamic";
 // Includes either the linked reservation OR the linked ask request, based on
 // the call's `purpose` field.
 
-export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const { id } = await ctx.params;
   const call = await getCallRecord(id);
   if (!call) return NextResponse.json({ error: "call not found" }, { status: 404 });

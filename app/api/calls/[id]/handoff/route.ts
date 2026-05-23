@@ -3,6 +3,7 @@ import { z } from "zod";
 import { newTrace } from "@/lib/logging/trace";
 import { handoffUser } from "@/lib/calls/handoff";
 import { HandoffReason } from "@/lib/reservation/schema";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +19,9 @@ const Body = z.object({
 });
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const trace = newTrace();
   const { id: callId } = await ctx.params;
   let body: z.infer<typeof Body> = { reason: "manual" };

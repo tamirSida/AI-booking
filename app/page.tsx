@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { authedFetch } from "@/lib/auth/fetch-with-auth";
+import { useAuth } from "@/lib/auth/AuthProvider";
 
 interface RecentReservation {
   requestId: string;
@@ -41,6 +43,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Home() {
   const [tab, setTab] = useState<"reservation" | "ask">("reservation");
+  const { user, signOut } = useAuth();
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-8">
       <header className="flex items-center justify-between">
@@ -48,7 +51,11 @@ export default function Home() {
           <h1 className="text-2xl font-semibold">ai_booking</h1>
           <p className="text-sm opacity-70">AI phone agent — reservations & questions</p>
         </div>
-        <Link href="/contacts" className="text-sm underline opacity-80 hover:opacity-100">Contacts →</Link>
+        <div className="flex items-center gap-4 text-sm">
+          <Link href="/contacts" className="underline opacity-80 hover:opacity-100">Contacts →</Link>
+          {user?.email && <span className="opacity-60 text-xs">{user.email}</span>}
+          <button onClick={() => void signOut()} className="opacity-70 hover:opacity-100">Sign out</button>
+        </div>
       </header>
 
       <nav className="flex gap-2 border-b border-black/10 dark:border-white/10">
@@ -109,7 +116,7 @@ function ContactPicker({
 function useContacts(): ContactRow[] {
   const [contacts, setContacts] = useState<ContactRow[]>([]);
   useEffect(() => {
-    fetch("/api/contacts")
+    authedFetch("/api/contacts")
       .then((r) => r.ok ? r.json() : { items: [] })
       .then((d) => setContacts(d.items ?? []))
       .catch(() => {});
@@ -160,7 +167,7 @@ function ReservationPanel() {
   useEffect(() => { void refreshRecent(); }, []);
   async function refreshRecent() {
     try {
-      const res = await fetch("/api/reservations");
+      const res = await authedFetch("/api/reservations");
       if (!res.ok) return;
       const data = await res.json();
       setRecent(data.items ?? []);
@@ -170,7 +177,7 @@ function ReservationPanel() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const res = await fetch("/api/reservations", {
+    const res = await authedFetch("/api/reservations", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         restaurantPhoneNumber, restaurantName: restaurantName || "Restaurant", city,
@@ -187,7 +194,7 @@ function ReservationPanel() {
     if (!draftId) return;
     setStage("placing");
     setError(null);
-    const res = await fetch(`/api/reservations/${draftId}/place-call`, { method: "POST" });
+    const res = await authedFetch(`/api/reservations/${draftId}/place-call`, { method: "POST" });
     const data = await res.json();
     if (!res.ok) { setError(data.error ?? "failed"); setStage("review"); return; }
     router.push(`/calls/${data.callId}`);
@@ -317,7 +324,7 @@ function AskPanel() {
   useEffect(() => { void refreshRecent(); }, []);
   async function refreshRecent() {
     try {
-      const res = await fetch("/api/asks");
+      const res = await authedFetch("/api/asks");
       if (!res.ok) return;
       const data = await res.json();
       setRecent(data.items ?? []);
@@ -329,7 +336,7 @@ function AskPanel() {
     setError(null);
     const filtered = questions.map((q) => q.trim()).filter((q) => q.length > 0);
     if (filtered.length === 0) { setError("Add at least one question"); return; }
-    const res = await fetch("/api/asks", {
+    const res = await authedFetch("/api/asks", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         recipientPhoneNumber,
@@ -348,7 +355,7 @@ function AskPanel() {
     if (!draftId) return;
     setStage("placing");
     setError(null);
-    const res = await fetch(`/api/asks/${draftId}/place-call`, { method: "POST" });
+    const res = await authedFetch(`/api/asks/${draftId}/place-call`, { method: "POST" });
     const data = await res.json();
     if (!res.ok) { setError(data.error ?? "failed"); setStage("review"); return; }
     router.push(`/calls/${data.callId}`);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { newTrace } from "@/lib/logging/trace";
 import { twilioClient } from "@/lib/twilio/client";
 import { getCallRecord, updateCallRecord } from "@/lib/calls/store";
+import { requireAuth } from "@/lib/auth/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,10 @@ export const dynamic = "force-dynamic";
 // Uses Twilio's Calls.update to mark the call completed, which propagates
 // through to the worker's media stream stop event and unwinds everything.
 
-export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  void auth;
   const { id: callId } = await ctx.params;
   const trace = newTrace({ requestId: callId });
   const record = await getCallRecord(callId);
