@@ -15,7 +15,8 @@ import OpenAI from "openai";
 // GA Realtime API (not the retired /beta/realtime path).
 import { OpenAIRealtimeWS } from "openai/realtime/ws";
 import twilioPkg from "twilio";
-import { restaurantSystemPrompt, type ReservationContext } from "./prompts.js";
+import { restaurantSystemPrompt } from "./prompts.js";
+import type { ReservationContext } from "./prompts.js";
 import { writeLog } from "./firestore-logs.js";
 
 const twilioRest = () => {
@@ -75,6 +76,16 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
   let openai: OpenAIRealtimeWS | null = null;
   let openaiReady = false;
   const earlyAudioQueue: string[] = [];
+  // Fallback: if the host doesn't speak within this many ms after the stream
+  // starts, the AI initiates. Covers silent-host and distracted-pickup cases.
+  // Trade-off: an IVR with long hold music could trigger this and the AI would
+  // talk over the music. Rare enough that the safety win is worth it.
+  const HOST_SILENCE_TIMEOUT_MS = 4000;
+  let hostSilenceTimer: ReturnType<typeof setTimeout> | null = null;
+  let hostHasSpoken = false;
+  // Track whether OpenAI is mid-response. Used to suppress duplicate
+  // response.create attempts that cause "active response in progress" errors.
+  let responseInFlight = false;
 
   // Hangup coordination: when the model calls end_call, we don't terminate the
   // Twilio call immediately. We wait for the model's final spoken sentence to
@@ -93,6 +104,7 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
 
   const closeAll = (reason: string) => {
     logEverywhere("bridge_closing", { reason });
+    if (hostSilenceTimer) { clearTimeout(hostSilenceTimer); hostSilenceTimer = null; }
     try { openai?.close({ code: 1000, reason }); } catch {}
     try { twilioWs.close(1000, reason); } catch {}
   };
@@ -118,11 +130,33 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
       internalRequestId = msg.start.customParameters?.requestId ?? null;
       logEverywhere("twilio_stream_started", { streamSid, callSid, customParameters: msg.start.customParameters });
 
+      // Arm the silent-host fallback. Cleared when host_speech_started fires.
+      hostSilenceTimer = setTimeout(() => {
+        if (hostHasSpoken || !openai || !openaiReady || responseInFlight) return;
+        logEverywhere("host_silence_timeout_fired");
+        openai.send({ type: "response.create" });
+      }, HOST_SILENCE_TIMEOUT_MS);
+
       const context = await resolveContext(msg.start.customParameters ?? {});
       openai = new OpenAIRealtimeWS(
         { model: realtimeModel },
         new OpenAI({ apiKey: openaiApiKey }),
       );
+
+      // Track response lifecycle so we know when it's safe to fire a new one.
+      openai.on("response.created", () => { responseInFlight = true; });
+      openai.on("response.done", () => { responseInFlight = false; });
+
+      // When the host's utterance is committed (speech_stopped + buffer
+      // committed), trigger a response — but only if one isn't already in
+      // flight. This replaces create_response: true.
+      openai.on("input_audio_buffer.speech_stopped", () => {
+        if (responseInFlight) {
+          logEverywhere("response_skipped_in_flight");
+          return;
+        }
+        openai!.send({ type: "response.create" });
+      });
 
       openai.on("session.created", () => {
         logEverywhere("openai_session_created");
@@ -137,6 +171,11 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
             model: realtimeModel,
             instructions: restaurantSystemPrompt(context),
             output_modalities: ["audio"],
+            // gpt-realtime-2 is a reasoning model and by default "thinks"
+            // before speaking — adds ~1-2s of silence before the first audio
+            // frame. For a phone reservation we need conversational pace, not
+            // deep planning. Minimal effort cuts that overhead dramatically.
+            reasoning: { effort: "minimal" },
             tools: [
               {
                 type: "function",
@@ -166,10 +205,16 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
                 format: { type: "audio/pcmu" },
                 transcription: { model: "whisper-1" },
                 turn_detection: {
-                  type: "server_vad",
-                  threshold: 0.5,
-                  prefix_padding_ms: 300,
-                  silence_duration_ms: 600,
+                  // Semantic VAD with high eagerness caps at 2s, feels snappy.
+                  // create_response: false — we manually fire response.create
+                  // when (a) host has finished speaking AND (b) no response is
+                  // currently in flight. This avoids "active response in
+                  // progress" errors when the host barges in or background
+                  // noise re-triggers VAD before the AI finishes its turn.
+                  type: "semantic_vad",
+                  eagerness: "high",
+                  interrupt_response: false,
+                  create_response: false,
                 },
               },
               output: {
@@ -180,10 +225,12 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
             },
           },
         });
-        // Greet immediately. OpenAI processes events in order, so this runs
-        // after the session.update above is applied. Don't wait for the
-        // session.updated ack — that's a wasted round-trip.
-        openai!.send({ type: "response.create" });
+        // Stay silent until the host says something. Server VAD will detect
+        // their first utterance and (because turn_detection.create_response =
+        // true) auto-fire a response. This naturally skips IVR hold music —
+        // music doesn't trigger VAD, only speech does. The prompt instructs
+        // the model that its FIRST response is always the Turn 1 template
+        // regardless of what the host actually said.
       });
 
       openai.on("session.updated", () => {
@@ -247,8 +294,12 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
       });
 
       openai.on("input_audio_buffer.speech_started", () => {
-        // Host started talking — interrupt any AI playback.
-        if (streamSid) twilioWs.send(JSON.stringify({ event: "clear", streamSid }));
+        // With interrupt_response: false, OpenAI does NOT cancel the current
+        // assistant response when the host starts speaking. Don't wipe the
+        // Twilio outbound buffer — let the AI's sentence finish, then it'll
+        // respond to the host's turn naturally on the next response.create.
+        hostHasSpoken = true;
+        if (hostSilenceTimer) { clearTimeout(hostSilenceTimer); hostSilenceTimer = null; }
         logEverywhere("host_speech_started");
       });
 

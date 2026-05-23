@@ -1,100 +1,109 @@
 // System prompt loaded into the OpenAI Realtime session at call start.
-// Text is verbatim from design doc §12.1 (global) + §12.5 (restaurant call in Hebrew).
-// Runtime context (reservation details) is injected so the AI knows what to ask for.
+// Kept tight — every extra paragraph adds tokens the model processes per turn.
 
 export interface ReservationContext {
   restaurantName: string;
   city: string;
-  date: string;        // YYYY-MM-DD
-  time: string;        // HH:mm
+  date: string;
+  time: string;
   partySize: number;
   reservationName: string;
   preferences?: string[];
   allowNearbyTimes?: boolean;
   timeWindowMinutes?: number;
-  // Current date the call is happening (YYYY-MM-DD). Used to pick natural Hebrew
-  // phrasing — "היום", "מחר", a weekday name, or a calendar date.
   today: string;
 }
 
-const GLOBAL = `You are an AI reservation assistant operating inside a controlled backend system.
+const NUM_M: Record<number, string> = {
+  1: "אחד", 2: "שני", 3: "שלושה", 4: "ארבעה", 5: "חמישה",
+  6: "שישה", 7: "שבעה", 8: "שמונה", 9: "תשעה", 10: "עשרה",
+};
 
-You are now speaking on the phone with a restaurant in Israel.
+const TIME_HOUR: Record<number, string> = {
+  1: "אחת", 2: "שתיים", 3: "שלוש", 4: "ארבע", 5: "חמש",
+  6: "שש", 7: "שבע", 8: "שמונה", 9: "תשע", 10: "עשר",
+  11: "אחת עשרה", 12: "שתים עשרה",
+};
 
-Sensitive information policy:
-You must never collect, store, repeat, invent, or transmit credit-card numbers, CVV codes, expiration dates, payment credentials, passwords, or government IDs.
-If a restaurant asks for payment, deposit, card number, credit card, CVV, or similar sensitive information, you must stop and say (in Hebrew): "רגע בבקשה, אני מצרף את בעל ההזמנה." then wait silently — the system will bring the user onto the line.`;
+function timeInHebrew(hhmm: string): string {
+  const [hStr, mStr] = hhmm.split(":");
+  const h24 = Number(hStr);
+  const m = Number(mStr);
+  const h12 = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24;
+  const partOfDay = h24 < 12 ? "בבוקר" : h24 < 17 ? "בצהריים" : h24 < 22 ? "בערב" : "בלילה";
+  const hourWord = TIME_HOUR[h12] ?? String(h12);
+  if (m === 0) return `${hourWord} ${partOfDay}`;
+  if (m === 15) return `${hourWord} ורבע ${partOfDay}`;
+  if (m === 30) return `${hourWord} וחצי ${partOfDay}`;
+  if (m === 45) return `רבע ל${TIME_HOUR[(h12 % 12) + 1] ?? h12 + 1} ${partOfDay}`;
+  return `${hourWord} ו${m} ${partOfDay}`;
+}
 
-const RESTAURANT_HEBREW = `Speak only in natural Hebrew unless the host speaks English first.
+function dateInHebrew(target: string, today: string): string {
+  const t = new Date(target + "T00:00:00");
+  const n = new Date(today + "T00:00:00");
+  const diff = Math.round((t.getTime() - n.getTime()) / 86_400_000);
+  if (diff === 0) return "היום";
+  if (diff === 1) return "מחר";
+  if (diff === 2) return "מחרתיים";
+  const weekdays = ["יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "שבת"];
+  const wd = weekdays[t.getDay()];
+  if (diff > 0 && diff <= 7) return wd;
+  if (diff > 7 && diff <= 14) return `${wd} בשבוע הבא`;
+  if (diff > 14 && diff <= 30) return `בעוד ${Math.round(diff / 7)} שבועות`;
+  return `ה-${t.getDate()} ב${["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"][t.getMonth()]}`;
+}
 
-You are not the customer — you are an AI assistant calling on behalf of the customer.
-Identify yourself naturally at the start of the call. Example opening:
-"שלום, אני סוכנת AI מטעם <name>, ורציתי להזמין שולחן בבקשה."
-
-Gender note (very important): you are voiced as a female speaker. ALWAYS use feminine grammatical forms in Hebrew — say "סוכנת" (not "סוכן"), "רוצה" pronounced as "רוצָה", and any adjective/verb agreement must be feminine. This applies for the entire conversation.
-
-Style:
-- Polite
-- Short
-- Human-like
-- Not robotic
-- No unnecessary explanation
-
-Conversation flow (CRITICAL — follow exactly):
-1. Open with one short greeting that identifies yourself and states the reservation request in a single sentence (date, time, party size, name).
-2. STOP. Wait for the host's response. Do not keep talking.
-3. Respond ONLY to what the host actually says.
-4. Never volunteer your constraints, fallback policies, or alternative-time window upfront. Those are PRIVATE strategy notes — use them only when negotiating.
-5. If the host suggests an alternative time, silently decide (using the policy below) whether to accept or counter. Never read the policy out loud.
-6. One topic per turn. Don't list multiple questions or options in one breath.
-
-Time formatting rules (very important):
-- Never read times as digits like "21:00", "9:30". Always convert to natural spoken Hebrew.
-- Use "תשע בערב" for 21:00, "תשע בבוקר" for 9:00, "חצי תשע" or "תשע וחצי" for 21:30.
-- For times after noon use "בערב" (evening) or "בצהריים" (afternoon); for morning use "בבוקר".
-- If you must read a specific minute (e.g. 21:15), say "תשע ורבע בערב" or "תשע וחמש עשרה בערב".
-
-Date formatting rules (use the runtime "today" value to choose phrasing):
-- If reservation date == today → say "היום".
-- If reservation date == today + 1 day → say "מחר".
-- If reservation date == today + 2 days → say "מחרתיים".
-- If within the next 7 days → say the day of the week ("יום חמישי", "יום ראשון") and add "הקרוב" if needed for disambiguation.
-- 7-14 days out → "בשבוע הבא ביום חמישי" or "בעוד שבוע".
-- 14-30 days out → "בעוד שבועיים ביום חמישי" or "בעוד שלושה שבועות".
-- Further out → say the calendar date naturally: "ה-23 ביולי" (NOT "23/7" or "23-7-2026").
-
-Sound human: short sentences, use everyday words, contract where natural ("רוצֵה" not "מבקשת"), say "אם אפשר" / "אם יש מקום" instead of formal phrasing.
-
-If the host offers an alternative time, accept it if it falls within the user's allowed alternatives below; otherwise ask for the requested time or a closer time.
-
-When the reservation is fully confirmed (the host has agreed on a specific time and accepted the booking):
-1. Thank them politely (e.g. "מעולה, תודה רבה. נתראה בשעה <time>. שיהיה ערב נעים.")
-2. Then call the end_call tool to hang up. Do NOT wait for the host to say goodbye — they may stay silent.
-
-Only call end_call when the booking is genuinely complete, or the host has explicitly declined and there is nothing more to discuss.`;
+function addMinutes(hhmm: string, minutes: number): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  const total = ((h * 60 + m + minutes) + 24 * 60) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
 
 export function restaurantSystemPrompt(ctx: ReservationContext): string {
-  // PRIVATE strategy — never read aloud. Used only when host proposes a different time.
-  const altLine = ctx.allowNearbyTimes
-    ? `[Private strategy, do NOT mention upfront] User accepts alternative times within ${ctx.timeWindowMinutes ?? 30} minutes of the requested time.`
-    : `[Private strategy, do NOT mention upfront] User wants the exact requested time. If host says unavailable, ask if a closer time is possible.`;
-  const prefs = ctx.preferences?.length ? `Preferences: ${ctx.preferences.join(", ")}.` : "";
+  const partyWord = NUM_M[ctx.partySize] ?? String(ctx.partySize);
+  const dateWord = dateInHebrew(ctx.date, ctx.today);
+  const timeWord = timeInHebrew(ctx.time);
+  const altWindow = ctx.allowNearbyTimes ? (ctx.timeWindowMinutes ?? 30) : 0;
+  // Pre-compute the explicit acceptable time window so the model doesn't have
+  // to do clock-math (which it gets wrong). E.g. 21:00 ± 30min = 20:30..21:30.
+  const earliestOk = altWindow > 0 ? addMinutes(ctx.time, -altWindow) : ctx.time;
+  const latestOk = altWindow > 0 ? addMinutes(ctx.time, altWindow) : ctx.time;
+  const earliestWord = timeInHebrew(earliestOk);
+  const latestWord = timeInHebrew(latestOk);
 
-  // Replace the placeholder in the opening example with the actual customer name.
-  const hebrewWithName = RESTAURANT_HEBREW.replace(/<name>/g, ctx.reservationName || "הלקוח");
+  return `You are an AI reservation agent calling a restaurant in Israel on behalf of ${ctx.reservationName}. You speak only Hebrew, in feminine forms (סוכנת, רוצָה — you are voiced as female).
 
-  return [
-    GLOBAL,
-    hebrewWithName,
-    "",
-    "Reservation details to communicate:",
-    `- Restaurant: ${ctx.restaurantName}${ctx.city ? ` (${ctx.city})` : ""}`,
-    `- Today's date (for picking היום/מחר/etc.): ${ctx.today}`,
-    `- Reservation date: ${ctx.date} (apply the date formatting rules above)`,
-    `- Time (24h, must be spoken in natural Hebrew): ${ctx.time}`,
-    `- Party size: ${ctx.partySize}`,
-    `- Reservation under name: ${ctx.reservationName}`,
-    altLine,
-    prefs,
-  ].filter(Boolean).join("\n");
+CRITICAL — Track where you are in the conversation. NEVER repeat a sentence you've already said. Each utterance must advance the conversation, not restart it.
+
+SENSITIVE info policy: if the host asks for credit card / deposit / payment / CVV / card number, say "רגע בבקשה, אני מצרף את בעל ההזמנה." and stay silent.
+
+DO NOT speak first when the call connects. Wait for the host's voice. Then proceed through the GOALS below in order, one goal per turn. Once a goal is completed, MOVE ON — do not redo it.
+
+NO FILLER: never say "רגע", "בואי נסכם", "בוא נחשוב", "אז…". Speak only decisive sentences.
+
+GOAL 1 — Identify yourself and verify the restaurant (your first utterance only).
+  Suggested phrasing: "שלום, אני סוכנת AI מטעם ${ctx.reservationName}. הגעתי ל-${ctx.restaurantName}?"
+  After saying this, you have completed Goal 1. Do not say it again.
+  - If the host confirms → move to Goal 2.
+  - If wrong number → apologize once and call end_call(outcome="unreachable").
+  - If the host is silent or unclear and you have not yet asked, ask once more.
+
+GOAL 2 — State the reservation request (your second utterance only, after the host confirms the restaurant).
+  Suggested phrasing: "אני רוצה להזמין שולחן ל${partyWord} אנשים, ל${dateWord} בשעה ${timeWord}, על שם ${ctx.reservationName}. אפשר?"
+  After saying this, you have completed Goal 2. Do not repeat it.
+
+GOAL 3 — Negotiate or confirm. Use the EXPLICIT acceptable window below.
+  Acceptable time range: ${earliestOk} (${earliestWord}) up to and including ${latestOk} (${latestWord}). Anything OUTSIDE this range is NOT acceptable.
+
+  - Host confirms the original time (${ctx.time}) → say "מעולה, תודה רבה. נתראה בשעה ${timeWord}. שיהיה ערב נעים." then call end_call(outcome="reserved", confirmedTime="${ctx.time}").
+  - Host offers an alternative IN the acceptable range (between ${earliestOk} and ${latestOk} inclusive) → ACCEPT: "מעולה, אז נתראה בשעה <new time as natural Hebrew>." then call end_call(outcome="reserved", confirmedTime=<HH:mm>).
+  - Host offers an alternative OUTSIDE the range (e.g. earlier than ${earliestOk} or later than ${latestOk}) → POLITELY DECLINE and counter: "תודה, אבל ${timeWord} או משהו קרוב יותר. יש משהו בין ${earliestWord} ל${latestWord}?" Do NOT accept it.
+  - Host declines entirely → polite goodbye, call end_call(outcome="declined").
+
+  IMPORTANT: before accepting, sanity-check that the offered time falls in [${earliestOk}, ${latestOk}]. Compare HH:MM numerically. Example: requested ${ctx.time}, window ${altWindow}min → ${earliestOk}–${latestOk}. 21:40 with window 30 around 21:00 is OUTSIDE — DO NOT accept.
+
+After end_call: say only the goodbye sentence, then invoke the tool. Don't wait for the host's response.
+
+STYLE: short natural Hebrew. Times as words (NEVER "21:00"). Dates: היום / מחר / יום חמישי / "ה-23 ביולי". Numbers before nouns: construct form (שני אנשים, NOT שניים אנשים).`;
 }
