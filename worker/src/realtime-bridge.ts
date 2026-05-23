@@ -113,7 +113,10 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
 
       openai.on("session.created", () => {
         logEverywhere("openai_session_created");
-        // GA Realtime session shape — audio config is nested, modalities is renamed.
+        // Send session.update AND response.create in one burst so the AI starts
+        // generating the greeting immediately instead of waiting another round-
+        // trip for session.updated. OpenAI processes client events in order,
+        // so the session config is applied before the response runs.
         openai!.send({
           type: "session.update",
           session: {
@@ -164,19 +167,21 @@ export async function runBridge(args: BridgeArgs): Promise<void> {
             },
           },
         });
+        // Greet immediately. OpenAI processes events in order, so this runs
+        // after the session.update above is applied. Don't wait for the
+        // session.updated ack — that's a wasted round-trip.
+        openai!.send({ type: "response.create" });
       });
 
       openai.on("session.updated", () => {
         openaiReady = true;
         logEverywhere("openai_session_updated", { queuedFrames: earlyAudioQueue.length });
-        // Flush any audio that arrived before the session was ready.
+        // Flush any input audio that piled up while we waited for the session
+        // to be configured (input_audio_format must be set before we can append).
         for (const payload of earlyAudioQueue) {
           openai!.send({ type: "input_audio_buffer.append", audio: payload });
         }
         earlyAudioQueue.length = 0;
-        // Greet first — the restaurant host expects to hear us first when they pick up.
-        // GA Realtime: response.create no longer takes `modalities` (it's session-scoped).
-        openai!.send({ type: "response.create" });
       });
 
       // GA Realtime renamed audio events: response.audio.* → response.output_audio.*

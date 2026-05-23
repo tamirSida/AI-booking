@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id: callId } = await ctx.params;
   const since = req.nextUrl.searchParams.get("since");
+  // Requires composite index (callId asc, createdAt asc). See firestore.indexes.json.
   let q = logsCol().where("callId", "==", callId).orderBy("createdAt", "asc").limit(500);
   if (since) {
     const ts = new Date(since);
